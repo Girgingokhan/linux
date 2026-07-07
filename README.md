@@ -30,7 +30,10 @@ Port       : 502
 
 
 ====================================
-Voltage L1      : 230.45 V
-Current L1      : 18.72 A
-Active Power    : 4200.35 W
+Voltage L1 : 230.45 V
+Current L1 : 18.72 A
+Active Power : 4200.35 W
 ====================================
+
+
+
