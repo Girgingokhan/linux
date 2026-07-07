@@ -1,171 +1,236 @@
+/*
+===========================================================
+ Siemens PAC3200 Modbus TCP Client Example
+
+ Platform:
+ BeagleBone Black
+ Embedded Debian Linux
+
+ Communication:
+ Modbus TCP over Ethernet
+
+ Library:
+ libmodbus
+
+ Description:
+ This application reads electrical measurement values
+ from Siemens PAC3200 energy analyzer.
+
+ BeagleBone Black:
+     Modbus TCP Client (Master)
+
+ Siemens PAC3200:
+     Modbus TCP Server (Slave)
+
+===========================================================
+*/
+
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <linux/i2c-dev.h>
+#include <unistd.h>
 #include <errno.h>
 
-// I2C cihazý ve LCD adresi
-#define I2C_DEV "/dev/i2c-2"
-#define LCD_ADDR 0x27
+#include <modbus/modbus.h>
 
-// LCD komutlarý
-#define LCD_CLEARDISPLAY 0x01
-#define LCD_RETURNHOME   0x02
-#define LCD_ENTRYMODESET 0x04
-#define LCD_DISPLAYCONTROL 0x08
-#define LCD_FUNCTIONSET  0x20
 
-// LCD modlari
-#define LCD_BACKLIGHT 0x08
-#define ENABLE_BIT    0x04
 
-// Fonksiyon prototipleri
-void lcd_write_nibble(int fd, uint8_t nibble, uint8_t mode);
-void lcd_send_byte(int fd, uint8_t data, uint8_t mode);
-void lcd_send_cmd(int fd, uint8_t cmd);
-void lcd_send_data(int fd, uint8_t data);
-void lcd_init(int fd);
-void lcd_clear(int fd);
-void lcd_set_cursor(int fd, int line, int col);
-void lcd_print(int fd, const char *str);
-int read_adc_value(void);
+/*
+===========================================================
+ Configuration
+===========================================================
+*/
 
-// LCD’ye nibble (4 bit) yazma: Enable sinyalini tetikleyerek veriyi gönderir.
-void lcd_write_nibble(int fd, uint8_t nibble, uint8_t mode) {
-    uint8_t data = nibble | mode | LCD_BACKLIGHT;
-    // Ýlk yazým
-    if (write(fd, &data, 1) != 1) {
-        perror("I2C: nibble write error");
-    }
-    usleep(500);
-    // Enable'ý aktif et
-    data |= ENABLE_BIT;
-    if (write(fd, &data, 1) != 1) {
-        perror("I2C: nibble write error");
-    }
-    usleep(500);
-    // Enable'ý pasif yap
-    data &= ~ENABLE_BIT;
-    if (write(fd, &data, 1) != 1) {
-        perror("I2C: nibble write error");
-    }
-    usleep(500);
+
+#define PAC3200_IP      "192.168.1.20"
+
+#define MODBUS_PORT     502
+
+
+
+/*
+===========================================================
+ PAC3200 Modbus Register Addresses
+
+ NOTE:
+ Register addresses may change according to PAC3200
+ firmware and configuration.
+
+ These are example addresses.
+===========================================================
+*/
+
+
+#define REG_VOLTAGE_L1      19000
+
+#define REG_CURRENT_L1      19014
+
+#define REG_ACTIVE_POWER    19050
+
+
+
+
+
+/*
+===========================================================
+ Convert two Modbus registers into IEEE754 Float
+
+ PAC3200 stores measurement values as 32-bit float.
+
+ Example:
+
+ Register High Word
+ Register Low Word
+
+ Combine:
+
+ 32-bit Integer
+
+ Convert:
+
+ Float
+
+===========================================================
+*/
+
+
+float ModbusRegistersToFloat(uint16_t *data)
+{
+    uint32_t raw_value;
+    float result;
+
+    raw_value = ((uint32_t)data[0] << 16) | data[1];
+    memcpy(&result, &raw_value, sizeof(float));
+    return result;
 }
 
-// Veriyi önce yüksek nibble, sonra düþük nibble olarak gönderir.
-void lcd_send_byte(int fd, uint8_t data, uint8_t mode) {
-    uint8_t high_nibble = data & 0xF0;
-    uint8_t low_nibble = (data << 4) & 0xF0;
-    lcd_write_nibble(fd, high_nibble, mode);
-    lcd_write_nibble(fd, low_nibble, mode);
+
+
+
+
+
+
+/*
+===========================================================
+ Read Float32 value from PAC3200
+
+ Input:
+
+ ctx:
+ Modbus connection
+
+ address:
+ First register address
+
+
+ Output:
+
+ Float measurement value
+
+===========================================================
+*/
+
+
+float PAC3200_ReadFloat(modbus_t *ctx, int address)
+{
+    uint16_t registers[2];
+    int result;
+    /*
+        Read two Modbus registers
+        Function Code: 03 - Read Holding Registers
+    */
+    result = modbus_read_registers( ctx, address, 2, registers );
+
+        if(result < 0)
+        {
+            // printf("Modbus Read Error: %s\n", modbus_strerror(errno));
+            return -1.0f;
+        }
+    return ModbusRegistersToFloat(registers);
+
 }
 
-void lcd_send_cmd(int fd, uint8_t cmd) {
-    lcd_send_byte(fd, cmd, 0);
-}
 
-void lcd_send_data(int fd, uint8_t data) {
-    lcd_send_byte(fd, data, 1);
-}
 
-// LCD baþlatma dizisi: 4-bit mod ayarlamasý ve temel komutlar
-void lcd_init(int fd) {
-    usleep(50000); // Güç uygulandýktan sonra bekle (>40ms)
-    
-    // Function set: 8-bit mod komutlarýný üç kez gönder
-    lcd_write_nibble(fd, 0x30, 0);
-    usleep(4500);
-    lcd_write_nibble(fd, 0x30, 0);
-    usleep(4500);
-    lcd_write_nibble(fd, 0x30, 0);
-    usleep(150);
-    
-    // 4-bit mode'a geçiþ
-    lcd_write_nibble(fd, 0x20, 0);
-    
-    // Artýk tam komutlar gönderilebilir:
-    lcd_send_cmd(fd, LCD_FUNCTIONSET | 0x08);      // 4-bit, 2 satýr, 5x8 nokta
-    lcd_send_cmd(fd, LCD_DISPLAYCONTROL | 0x04);     // Ekran açýk, imleç kapalý
-    lcd_clear(fd);
-    lcd_send_cmd(fd, LCD_ENTRYMODESET | 0x02);       // Artan adres modunda
-}
+int main(){
 
-void lcd_clear(int fd) {
-    lcd_send_cmd(fd, LCD_CLEARDISPLAY);
-    usleep(2000);
-}
+    modbus_t *ctx;
 
-void lcd_set_cursor(int fd, int line, int col) {
-    int row_offsets[] = {0x00, 0x40, 0x14, 0x54};
-    lcd_send_cmd(fd, 0x80 | (col + row_offsets[line]));
-}
+    float voltage_L1;
+    float current_L1;
+    float active_power;
+    /*
+    =======================================================
+    Create Modbus TCP Context
+    IP: Siemens PAC3200 IP address
+    Port:Standard Modbus TCP port 502
+    =======================================================
+    */
 
-void lcd_print(int fd, const char *str) {
-    while (*str) {
-        lcd_send_data(fd, *str++);
-    }
-}
-
-// ADC okumasý: sysfs üzerinden analog deðeri alýr (AIN0)
-int read_adc_value(void) {
-    FILE *fp = fopen("/sys/bus/iio/devices/iio:device0/in_voltage0_raw", "r");
-    if (!fp) {
-        perror("ADC sysfs acilamadi");
+    ctx = modbus_new_tcp(PAC3200_IP, MODBUS_PORT );
+    if(ctx == NULL)
+    {
+        //printf( "Unable to create Modbus TCP context\n" );
         return -1;
     }
-    int value;
-    fscanf(fp, "%d", &value);
-    fclose(fp);
-    return value;
-}
 
-int main(void) {
-    int i2c_fd;
-    // I2C cihazýný aç
-    if ((i2c_fd = open(I2C_DEV, O_RDWR)) < 0) {
-        perror("I2C cihazý açýlamadý");
-        exit(1);
+
+    /*
+    =======================================================
+    Connect to PAC3200
+    =======================================================
+    */
+
+    if( modbus_connect(ctx) == -1 )
+    {
+      //  printf( "Connection failed: %s\n", modbus_strerror(errno) );
+        modbus_free(ctx);
+        return -1;
     }
-    // LCD'nin I2C slave adresini ayarla
-    if (ioctl(i2c_fd, I2C_SLAVE, LCD_ADDR) < 0) {
-        perror("I2C slave ayarlanamadý");
-        close(i2c_fd);
-        exit(1);
-    }
-    
-    // LCD'yi baþlat
-    lcd_init(i2c_fd);
-    lcd_clear(i2c_fd);
-    
-    while (1) {
-        int adc_raw = read_adc_value();
-        if (adc_raw < 0) {
-            break;
-        }
-        /*  
-         * ADC deðeri 12-bit (0 - 4095) olup, referans 1.8V'dir.
-         * Gerilim = (adc_raw / 4095.0) * 1.8
-         * LM35: 10mV/°C -> Sýcaklýk (°C) = Gerilim (V) * 100
-         */
-        double voltage = (adc_raw / 4095.0) * 1.8;
-        double temp_c = voltage * 100.0;
+    printf( "\nConnected to Siemens PAC3200\n"  );
+
+    // printf( "IP Address : %s\n", PAC3200_IP );
+
+
+ //   printf( "Port       : %d\n\n", MODBUS_PORT);
+
+
+    /*
+    =======================================================
+    Main Measurement Loop
+    Read values every second
+    =======================================================
+    */
+    while(1)
+    {
+        /* Read L1 phase voltage */
+
+        voltage_L1 = PAC3200_ReadFloat( ctx, REG_VOLTAGE_L1 );
         
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "Temp: %.1f C", temp_c);
-        
-        lcd_clear(i2c_fd);
-        lcd_set_cursor(i2c_fd, 0, 0);
-        lcd_print(i2c_fd, buffer);
-        
+        /* Read L1 current */
+
+        current_L1 = PAC3200_ReadFloat( ctx,REG_CURRENT_L1 );
+
+        /* Read active power */
+
+        active_power = PAC3200_ReadFloat( ctx,  REG_ACTIVE_POWER );
+
+        printf("Voltage L1      : %.2f V\n", voltage_L1 );
+        printf("Current L1      : %.2f A\n", current_L1 );
+        printf("Active Power    : %.2f W\n", active_power);
+
+        /* Sampling time 1000 ms */
         sleep(1);
     }
-    
-    close(i2c_fd);
+
+    /*
+    =======================================================
+    Close Modbus Connection
+    =======================================================
+    */
+    modbus_close(ctx);
+    modbus_free(ctx);
     return 0;
 }
-
