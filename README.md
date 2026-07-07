@@ -4,16 +4,7 @@ BeagleBone Black + Embedded Debian + Siemens PAC3200 + Modbus TCP
 TI Sitara AM3358 Arm cortex A8
 
 
-+-------------------+        Ethernet TCP/IP        +----------------------+
-|                   |  -------------------------->  |                      |
-| Arm cortex A8     |        Port 502               | Siemens PAC3200      |
-| Debian Linux      |                               | Energy Analyzer      |
-| C/C++ Application |  <--------------------------  | Modbus TCP Server    |
-|                   |       Modbus Response         |                      |
-+-------------------+                               +----------------------+
-
 Compile on BeagleBone Debian
-
 
 Modbus Libraray
 sudo apt update
